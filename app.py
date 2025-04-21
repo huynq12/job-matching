@@ -15,6 +15,7 @@ import time
 import math
 from collections import Counter
 import pandas as pd
+from dotenv import load_dotenv
 
 # Tải các resource cần thiết của NLTK
 # try:
@@ -23,7 +24,7 @@ import pandas as pd
 
 # except Exception as e:
 #     print(f"NLTK download warning: {e}")
-
+load_dotenv()
 app = Flask(__name__)
 
 # Cấu hình
@@ -34,7 +35,7 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # Max 16MB
 
 # Kết nối MongoDB
 # MONGO_URI = "mongodb://localhost:27017/"
-MONGO_URI = "mongodb+srv://user_01:bkfZP0wqKsT3vFVt@cluster-01.gj5gm.mongodb.net/?retryWrites=true&w=majority&appName=Cluster-01&tsl=true" 
+MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = "job_matching"
 JOBS_COLLECTION = "job_dataset"
 STOPWORDS_EN = "stopwords_en"
@@ -59,6 +60,7 @@ POS_TAG = "pos_tag"
 def get_mongo_connection():
     client = MongoClient(MONGO_URI,tlsCAFile=certifi.where())
     db = client[DB_NAME]
+    print("Mongo URI: ", MONGO_URI)
     return client, db
 
 client, db = get_mongo_connection()
