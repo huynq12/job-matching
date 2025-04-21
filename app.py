@@ -68,13 +68,13 @@ client, db = get_mongo_connection()
 stop_words_collection = db[STOPWORDS_EN]
 job_collection = db[JOBS_COLLECTION]
 
-try:
-    nltk.download('punkt', quiet=True)
-    nltk.download('stopwords', quiet=True)
-    nltk.download('maxent_treebank_pos_tagger')
-    nltk.download('averaged_perceptron_tagger_eng', quiet=True)
-except Exception as e:
-    print(f"NLTK download warning: {e}")
+# try:
+#     nltk.download('punkt', quiet=True)
+#     nltk.download('stopwords', quiet=True)
+#     nltk.download('maxent_treebank_pos_tagger')
+#     nltk.download('averaged_perceptron_tagger_eng', quiet=True)
+# except Exception as e:
+#     print(f"NLTK download warning: {e}")
 
 
 def save_stop_words():
@@ -122,30 +122,30 @@ def preprocess_text(text):
         print(f"Error in text preprocessing: {e}")
         return text  
 
-def preprocess_text_v2(text):
-    try:
-        text = text.lower()
-        text = re.sub(r'[^a-zA-Z\s]', '', text)
+# def preprocess_text_v2(text):
+#     try:
+#         text = text.lower()
+#         text = re.sub(r'[^a-zA-Z\s]', '', text)
 
-        sentences = sent_tokenize(text)
+#         sentences = sent_tokenize(text)
 
-        stop_words_docs = list(stop_words_collection.find({}, {'text': 1, '_id': 0}))
-        stop_words = set(doc['text'] for doc in stop_words_docs)
+#         stop_words_docs = list(stop_words_collection.find({}, {'text': 1, '_id': 0}))
+#         stop_words = set(doc['text'] for doc in stop_words_docs)
 
-        processed_sentences = []
+#         processed_sentences = []
 
-        for sent in sentences:
-            # if any(criteria in sent for criteria in ['skills', 'education']):
-            words = word_tokenize(sent)
-            words = [word for word in words if word not in stop_words]
-            tagged_words = pos_tag(words)
-            filtered_words = [word for word, tag in tagged_words if tag not in ['DT', 'IN', 'TO', 'PRP', 'WP']]
-            processed_sentences.append(" ".join(filtered_words))
+#         for sent in sentences:
+#             # if any(criteria in sent for criteria in ['skills', 'education']):
+#             words = word_tokenize(sent)
+#             words = [word for word in words if word not in stop_words]
+#             tagged_words = pos_tag(words)
+#             filtered_words = [word for word, tag in tagged_words if tag not in ['DT', 'IN', 'TO', 'PRP', 'WP']]
+#             processed_sentences.append(" ".join(filtered_words))
 
-        return " ".join(processed_sentences)
-    except Exception as e:
-        print(f"Error in text preprocessing: {e}")
-        return text  
+#         return " ".join(processed_sentences)
+#     except Exception as e:
+#         print(f"Error in text preprocessing: {e}")
+#         return text  
    
 
 def calculate_tfidf_docs(documents):
@@ -205,7 +205,7 @@ def build_tfidf_model():
         client.close()
         return None, None, []
     
-    job_texts = [preprocess_text_v2(job.get('job_description', '') + job.get('position_title','') + job.get('model_response', '')) for job in all_jobs]
+    job_texts = [preprocess_text(job.get('job_description', '') + job.get('position_title','') + job.get('model_response', '')) for job in all_jobs]
     job_words = [[word for word in text.split()] for text in job_texts]
     
     tfidf_documents = calculate_tfidf_docs(job_words)
@@ -215,7 +215,7 @@ def build_tfidf_model():
 
 
 def find_matching_jobs(resume_text, k=5):
-    processed_resume = preprocess_text_v2(resume_text)
+    processed_resume = preprocess_text(resume_text)
     resume_words = processed_resume.split()
     
     # Tải hoặc xây dựng mô hình TF-IDF và KNN
