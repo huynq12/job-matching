@@ -5,8 +5,6 @@ import nltk
 from nltk.corpus import stopwords
 from nltk import pos_tag
 from nltk.tokenize import word_tokenize, sent_tokenize
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.neighbors import NearestNeighbors
 import re
 import os
 from werkzeug.utils import secure_filename
@@ -38,6 +36,21 @@ DB_NAME = "job_matching"
 JOBS_COLLECTION = "job_dataset"
 STOPWORDS_EN = "stopwords_en"
 POS_TAG = "pos_tag"
+
+# Khởi tạo model BERT (tải khi cần thiết)
+# device = "cuda" if torch.cuda.is_available() else "cpu"
+# model_name = "bert-base-uncased"
+# tokenizer = None
+# model = None
+
+# def load_bert_model():
+#     global tokenizer, model
+#     if tokenizer is None or model is None:
+#         print("Loading BERT model...")
+#         tokenizer = AutoTokenizer.from_pretrained(model_name)
+#         model = AutoModel.from_pretrained(model_name)
+#         model.to(device)
+#         print("BERT model loaded")
 
 
 def get_mongo_connection():
@@ -119,11 +132,11 @@ def preprocess_text_v2(text):
 
         for sent in sentences:
             # if any(criteria in sent for criteria in ['skills', 'education']):
-                words = word_tokenize(sent)
-                words = [word for word in words if word not in stop_words]
-                tagged_words = pos_tag(words)
-                filtered_words = [word for word, tag in tagged_words if tag not in ['DT', 'IN', 'TO', 'PRP', 'WP']]
-                processed_sentences.append(" ".join(filtered_words))
+            words = word_tokenize(sent)
+            words = [word for word in words if word not in stop_words]
+            tagged_words = pos_tag(words)
+            filtered_words = [word for word, tag in tagged_words if tag not in ['DT', 'IN', 'TO', 'PRP', 'WP']]
+            processed_sentences.append(" ".join(filtered_words))
 
         return " ".join(processed_sentences)
     except Exception as e:
@@ -131,13 +144,10 @@ def preprocess_text_v2(text):
         return text  
    
 
-# Hàm tính TF-IDF
 def calculate_tfidf_docs(documents):
-    # Tính toán IDF
     idf_values = {}
     total_docs = len(documents)
     
-    # Đếm số tài liệu chứa mỗi từ
     for doc in documents:
         unique_words = set(doc)
         for word in unique_words:
@@ -145,21 +155,17 @@ def calculate_tfidf_docs(documents):
                 idf_values[word] = 0
             idf_values[word] += 1
     
-    # Tính IDF cho mỗi từ
     for word in idf_values:
         idf_values[word] = math.log(total_docs / idf_values[word])
     
-    # Tính toán TF-IDF cho từng tài liệu
     tfidf_documents = []
     for doc in documents:
-        # Tính TF
         tf_values = {}
         word_count = Counter(doc)
         doc_length = len(doc)
         for word, count in word_count.items():
             tf_values[word] = count / doc_length
         
-        # Tính TF-IDF
         tfidf_doc = {}
         for word in tf_values:
             tfidf_doc[word] = tf_values[word] * idf_values.get(word, 0)
@@ -189,13 +195,13 @@ def build_tfidf_model():
     client, db = get_mongo_connection()
     jobs_collection = db[JOBS_COLLECTION]
     
-    all_jobs = list(jobs_collection.find({}, {'_id': 1, 'job_description': 1, 'position_title': 1}))
+    all_jobs = list(jobs_collection.find({}, {'_id': 1, 'job_description': 1, 'position_title': 1, 'model_response': 1}))
     
     if not all_jobs:
         client.close()
         return None, None, []
     
-    job_texts = [preprocess_text_v2(job.get('job_description', '') + job.get('position_title','')) for job in all_jobs]
+    job_texts = [preprocess_text_v2(job.get('job_description', '') + job.get('position_title','') + job.get('model_response', '')) for job in all_jobs]
     job_words = [[word for word in text.split()] for text in job_texts]
     
     tfidf_documents = calculate_tfidf_docs(job_words)
@@ -205,8 +211,7 @@ def build_tfidf_model():
 
 
 def find_matching_jobs(resume_text, k=5):
-    # Tiền xử lý resume text
-    processed_resume = preprocess_text(resume_text)
+    processed_resume = preprocess_text_v2(resume_text)
     resume_words = processed_resume.split()
     
     # Tải hoặc xây dựng mô hình TF-IDF và KNN
@@ -270,6 +275,7 @@ def find_matching_jobs(resume_text, k=5):
             job_id = str(job.get('_id', 'unknown'))
             position_title = job.get('position_title', 'Unknown')
             similarity_score = float(1 - distance)
+            # similarity_score = distance
             job_description = job.get('job_description', '')
             
             matching_jobs.append({
@@ -280,85 +286,6 @@ def find_matching_jobs(resume_text, k=5):
             })
     
     return matching_jobs
-
-# def build_tfidf_model():
-#     """Xây dựng mô hình TF-IDF từ job descriptions trong MongoDB"""
-#     client, db = get_mongo_connection()
-#     jobs_collection = db[JOBS_COLLECTION]
-    
-#     # Lấy tất cả job descriptions từ MongoDB
-#     all_jobs = list(jobs_collection.find({}, {'_id': 1, 'job_description': 1, 'position_title': 1}))
-    
-#     if not all_jobs:
-#         client.close()
-#         return None, None, []
-    
-#     # Tiền xử lý job descriptions
-#     job_texts = [preprocess_text(job.get('job_description', '')) for job in all_jobs]
-    
-#     # Xây dựng TF-IDF vectorizer
-#     vectorizer = TfidfVectorizer(max_features=5000, ngram_range=(1, 2))
-#     job_vectors = vectorizer.fit_transform(job_texts)
-    
-#     # Xây dựng KNN model
-#     knn_model = NearestNeighbors(n_neighbors=min(10, len(all_jobs)), algorithm='auto', metric='cosine')
-#     knn_model.fit(job_vectors)
-    
-#     client.close()
-#     return vectorizer, knn_model, all_jobs
-
-# def find_matching_jobs(resume_text, k=5):
-#     """Tìm k job descriptions phù hợp nhất với resume"""
-#     # Tiền xử lý resume text
-#     processed_resume = preprocess_text(resume_text)
-    
-#     # Tải hoặc xây dựng mô hình TF-IDF và KNN
-#     model_path = 'tfidf_knn_model.pkl'
-#     if os.path.exists(model_path):
-#         try:
-#             with open(model_path, 'rb') as f:
-#                 model_data = pickle.load(f)
-#                 vectorizer = model_data['vectorizer']
-#                 knn_model = model_data['knn_model']
-#                 # Lấy lại thông tin job từ MongoDB để đảm bảo dữ liệu mới nhất
-#                 client, db = get_mongo_connection()
-#                 all_jobs = list(db[JOBS_COLLECTION].find({}, {'_id': 1, 'job_description': 1, 'position_title': 1}))
-#                 client.close()
-#         except Exception as e:
-#             print(f"Error loading model: {e}")
-#             vectorizer, knn_model, all_jobs = build_tfidf_model()
-#     else:
-#         vectorizer, knn_model, all_jobs = build_tfidf_model()
-#         # Lưu model để sử dụng sau này
-#         try:
-#             with open(model_path, 'wb') as f:
-#                 pickle.dump({'vectorizer': vectorizer, 'knn_model': knn_model}, f)
-#         except Exception as e:
-#             print(f"Error saving model: {e}")
-    
-#     if not vectorizer or not knn_model or not all_jobs:
-#         return []
-    
-#     # Chuyển đổi resume thành vector TF-IDF
-#     resume_vector = vectorizer.transform([processed_resume])
-    
-#     # Tìm k neighbors gần nhất
-#     distances, indices = knn_model.kneighbors(resume_vector, 
-#                                               n_neighbors=min(k, len(all_jobs)))
-    
-#     # Lấy thông tin của các jobs phù hợp nhất
-#     matching_jobs = []
-#     for i, idx in enumerate(indices[0]):
-#         if idx < len(all_jobs):
-#             matching_jobs.append({
-#                 'job_id': str(all_jobs[idx]['_id']),
-#                 'position_title': all_jobs[idx].get('position_title', 'Unknown'),
-#                 'similarity_score': float(1 - distances[0][i]),  # Chuyển khoảng cách thành độ tương đồng
-#                 'job_description': all_jobs[idx].get('job_description', '')
-#             })
-    
-#     return matching_jobs
-
 @app.route('/save-stop-words', methods= ['POST'])
 def save_stop_words_into_db():
     save_stop_words()
@@ -448,6 +375,72 @@ def rebuild_model():
         
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+
+def get_embeddings(text):
+    try:
+        if not text:
+            return np.zeros((1, 768))
+        
+        # Đảm bảo model đã được tải
+        if 'tokenizer' not in globals() or tokenizer is None:
+            load_bert_model()
+        
+        tokenizer_output = tokenizer(str(text), return_tensors="pt", truncation=True, padding=True).to(device)
+        with torch.no_grad():
+            outputs = model(**tokenizer_output)
+        
+        embeddings = outputs.last_hidden_state.mean(dim=1).to("cpu").numpy()
+        return embeddings
+    except Exception as e:
+        print(f"Error generating embeddings: {e}")
+        return np.zeros((1, 768)) 
+    
+# @app.route('/import-jobs', methods=['POST'])
+# def import_jobs():
+#     if 'file' not in request.files:
+#         return jsonify({"error": "No file part"}), 400
+    
+#     file = request.files['file']
+    
+#     if file.filename == '' or not file.filename.lower().endswith('.csv'):
+#         return jsonify({"error": "File must be a CSV"}), 400
+    
+#     file_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(file.filename))
+#     file.save(file_path)
+    
+#     try:
+#         # Đọc dữ liệu từ CSV
+#         df = pd.read_csv(file_path)
+        
+#         # Kiểm tra nếu cột thứ 3 tồn tại (job_description)
+#         if len(df.columns) < 3:
+#             return jsonify({"error": "CSV must have at least 3 columns"}), 400
+        
+#         jobs_data = []
+#         for _, row in df.iterrows():
+#             job_entry = {
+#                 "company": row.iloc[0],
+#                 "job_description": row.iloc[1],  # Cột thứ 2
+#                 "position_title": row.iloc[2],
+#                 "model_response": row.iloc[4]
+#             }
+#             jobs_data.append(job_entry)
+        
+#         # Thêm dữ liệu vào MongoDB
+#         collection.insert_many(jobs_data)
+        
+#         return jsonify({"success": True, "message": f"{len(jobs_data)} jobs imported successfully"}), 200
+    
+#     except Exception as e:
+#         return jsonify({"error": str(e)}), 500
+    
+#     finally:
+#         # Xóa file tạm sau khi xử lý
+#         if os.path.exists(file_path):
+#             os.remove(file_path)
+
 
 @app.route('/health', methods=['GET'])
 def health_check():
