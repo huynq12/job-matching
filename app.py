@@ -1,3 +1,4 @@
+import certifi
 from flask import Flask, request, jsonify
 from pymongo import MongoClient
 from pypdf import PdfReader
@@ -13,6 +14,7 @@ import pickle
 import time
 import math
 from collections import Counter
+import pandas as pd
 
 # Tải các resource cần thiết của NLTK
 # try:
@@ -31,7 +33,8 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # Max 16MB
 
 # Kết nối MongoDB
-MONGO_URI = "mongodb://localhost:27017/"
+# MONGO_URI = "mongodb://localhost:27017/"
+MONGO_URI = "mongodb+srv://user_01:bkfZP0wqKsT3vFVt@cluster-01.gj5gm.mongodb.net/?retryWrites=true&w=majority&appName=Cluster-01&tsl=true" 
 DB_NAME = "job_matching"
 JOBS_COLLECTION = "job_dataset"
 STOPWORDS_EN = "stopwords_en"
@@ -54,12 +57,13 @@ POS_TAG = "pos_tag"
 
 
 def get_mongo_connection():
-    client = MongoClient(MONGO_URI)
+    client = MongoClient(MONGO_URI,tlsCAFile=certifi.where())
     db = client[DB_NAME]
     return client, db
 
 client, db = get_mongo_connection()
 stop_words_collection = db[STOPWORDS_EN]
+job_collection = db[JOBS_COLLECTION]
 
 try:
     nltk.download('punkt', quiet=True)
@@ -71,9 +75,6 @@ except Exception as e:
 
 
 def save_stop_words():
-    client, db = get_mongo_connection()
-    stop_words_collection = db[STOPWORDS_EN]
-
     nltk.download('stopwords', quiet=True)
 
     stop_words = set(stopwords.words('english'))
@@ -378,68 +379,68 @@ def rebuild_model():
 
 
 
-def get_embeddings(text):
-    try:
-        if not text:
-            return np.zeros((1, 768))
-        
-        # Đảm bảo model đã được tải
-        if 'tokenizer' not in globals() or tokenizer is None:
-            load_bert_model()
-        
-        tokenizer_output = tokenizer(str(text), return_tensors="pt", truncation=True, padding=True).to(device)
-        with torch.no_grad():
-            outputs = model(**tokenizer_output)
-        
-        embeddings = outputs.last_hidden_state.mean(dim=1).to("cpu").numpy()
-        return embeddings
-    except Exception as e:
-        print(f"Error generating embeddings: {e}")
-        return np.zeros((1, 768)) 
-    
-# @app.route('/import-jobs', methods=['POST'])
-# def import_jobs():
-#     if 'file' not in request.files:
-#         return jsonify({"error": "No file part"}), 400
-    
-#     file = request.files['file']
-    
-#     if file.filename == '' or not file.filename.lower().endswith('.csv'):
-#         return jsonify({"error": "File must be a CSV"}), 400
-    
-#     file_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(file.filename))
-#     file.save(file_path)
-    
+# def get_embeddings(text):
 #     try:
-#         # Đọc dữ liệu từ CSV
-#         df = pd.read_csv(file_path)
+#         if not text:
+#             return np.zeros((1, 768))
         
-#         # Kiểm tra nếu cột thứ 3 tồn tại (job_description)
-#         if len(df.columns) < 3:
-#             return jsonify({"error": "CSV must have at least 3 columns"}), 400
+#         # Đảm bảo model đã được tải
+#         if 'tokenizer' not in globals() or tokenizer is None:
+#             load_bert_model()
         
-#         jobs_data = []
-#         for _, row in df.iterrows():
-#             job_entry = {
-#                 "company": row.iloc[0],
-#                 "job_description": row.iloc[1],  # Cột thứ 2
-#                 "position_title": row.iloc[2],
-#                 "model_response": row.iloc[4]
-#             }
-#             jobs_data.append(job_entry)
+#         tokenizer_output = tokenizer(str(text), return_tensors="pt", truncation=True, padding=True).to(device)
+#         with torch.no_grad():
+#             outputs = model(**tokenizer_output)
         
-#         # Thêm dữ liệu vào MongoDB
-#         collection.insert_many(jobs_data)
-        
-#         return jsonify({"success": True, "message": f"{len(jobs_data)} jobs imported successfully"}), 200
-    
+#         embeddings = outputs.last_hidden_state.mean(dim=1).to("cpu").numpy()
+#         return embeddings
 #     except Exception as e:
-#         return jsonify({"error": str(e)}), 500
+#         print(f"Error generating embeddings: {e}")
+#         return np.zeros((1, 768)) 
     
-#     finally:
-#         # Xóa file tạm sau khi xử lý
-#         if os.path.exists(file_path):
-#             os.remove(file_path)
+@app.route('/import-jobs', methods=['POST'])
+def import_jobs():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part"}), 400
+    
+    file = request.files['file']
+    
+    if file.filename == '' or not file.filename.lower().endswith('.csv'):
+        return jsonify({"error": "File must be a CSV"}), 400
+    
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(file.filename))
+    file.save(file_path)
+    
+    try:
+        # Đọc dữ liệu từ CSV
+        df = pd.read_csv(file_path)
+        
+        # Kiểm tra nếu cột thứ 3 tồn tại (job_description)
+        if len(df.columns) < 3:
+            return jsonify({"error": "CSV must have at least 3 columns"}), 400
+        
+        jobs_data = []
+        for _, row in df.iterrows():
+            job_entry = {
+                "company": row.iloc[0],
+                "job_description": row.iloc[1], 
+                "position_title": row.iloc[2],
+                "model_response": row.iloc[4]
+            }
+            jobs_data.append(job_entry)
+        
+        # Thêm dữ liệu vào MongoDB
+        job_collection.insert_many(jobs_data)
+        
+        return jsonify({"success": True, "message": f"{len(jobs_data)} jobs imported successfully"}), 200
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+    finally:
+        # Xóa file tạm sau khi xử lý
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
 
 @app.route('/health', methods=['GET'])
@@ -452,15 +453,15 @@ def health_check():
         client.close()
         
         # Kiểm tra model
-        model_status = "Not found"
-        if os.path.exists('tfidf_knn_model.pkl'):
-            model_status = "Available"
+        # model_status = "Not found"
+        # if os.path.exists('tfidf_knn_model.pkl'):
+        #     model_status = "Available"
         
         return jsonify({
             "status": "OK",
             "mongodb_connection": "Connected",
             "job_count": job_count,
-            "model_status": model_status
+            # "model_status": model_status
         })
     except Exception as e:
         return jsonify({
