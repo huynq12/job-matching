@@ -58,7 +58,8 @@ POS_TAG = "pos_tag"
 
 
 def get_mongo_connection():
-    client = MongoClient(MONGO_URI,tlsCAFile=certifi.where())
+    # client = MongoClient(MONGO_URI,tlsCAFile=certifi.where())
+    client = MongoClient(MONGO_URI)
     db = client[DB_NAME]
     print("Mongo URI: ", MONGO_URI)
     return client, db
