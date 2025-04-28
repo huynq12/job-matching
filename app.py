@@ -1,5 +1,6 @@
 import certifi
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from pymongo import MongoClient
 from pypdf import PdfReader
 import nltk
@@ -16,6 +17,8 @@ import math
 from collections import Counter
 import pandas as pd
 from dotenv import load_dotenv
+import json 
+from bson.objectid import ObjectId
 
 # Tải các resource cần thiết của NLTK
 # try:
@@ -26,6 +29,7 @@ from dotenv import load_dotenv
 #     print(f"NLTK download warning: {e}")
 load_dotenv()
 app = Flask(__name__)
+CORS(app, resources={r"/jobs/*": {"origins": "http://localhost:3000"}})
 
 # Cấu hình
 UPLOAD_FOLDER = 'uploads'
@@ -195,11 +199,7 @@ def find_knn(query_vector, vectors, k):
     return distances[:k]
 
 def build_tfidf_model():
-
-    client, db = get_mongo_connection()
-    jobs_collection = db[JOBS_COLLECTION]
-    
-    all_jobs = list(jobs_collection.find({}, {'_id': 1, 'job_description': 1, 'position_title': 1, 'model_response': 1}))
+    all_jobs = list(job_collection.find({}, {'_id': 1, 'job_description': 1, 'position_title': 1, 'model_response': 1}))
     
     if not all_jobs:
         client.close()
@@ -290,12 +290,66 @@ def find_matching_jobs(resume_text, k=5):
             })
     
     return matching_jobs
-@app.route('/save-stop-words', methods= ['POST'])
-def save_stop_words_into_db():
-    save_stop_words()
-    return jsonify({
-            "success": True,
-        })
+
+@app.route('/jobs/get-all', methods=['GET'])
+def get_all_jobs():
+    filter = request.args.get('filter', '')
+    skip = request.args.get('skip', default = 0, type = int)
+    take = request.args.get('take', default = 10, type = int)
+
+    query = {}
+    if filter:
+        if ObjectId.is_valid(filter):
+            query['_id'] = ObjectId(filter)
+        else:
+            query['$or'] = [
+                {'company': {'$regex': filter, '$options': 'i'}},
+                {'position_title': {'$regex': filter, '$options': 'i'}},
+                # {'model_response':{'$regex': filter, '$options': 'i'}}
+            ]
+
+    total_count = job_collection.count_documents(query)
+
+    jobs_cursor = job_collection.find(query, {'_id': 1, 'company': 1, 'position_title': 1, 'model_response': 1}).skip(skip).limit(take)
+    items = list(jobs_cursor)
+
+    custom_items = []
+
+    for job in items:
+        job_id = str(job['_id'])
+        company = job.get('company')
+        position_title = job.get('position_title')
+        benefit = None
+        model_response_str = job.get('model_response')
+        if(model_response_str):
+            try:
+                model_response_dict = json.loads(job['model_response'])
+                benefit = model_response_dict.get('Compensation and Benefits')
+            except (TypeError, json.JSONDecodeError):
+                benefit = None
+        
+        custom_job = {
+            'id': job_id,
+            'company': company,
+            'position_title': position_title,
+            'benefit': benefit
+        }
+
+        custom_items.append(custom_job)
+        
+    result = {
+        'totalCount': total_count,
+        'items': custom_items
+    }
+
+    response = {
+        'isSuccess': True,
+        'errorCode': None,
+        'data': result,
+        'message': None
+    }
+
+    return jsonify(response)
 
 @app.route('/match-resume', methods=['POST'])
 def match_resume():
@@ -354,31 +408,12 @@ def match_resume():
             "details": "An error occurred during processing"
         }), 500
 
-@app.route('/rebuild-model', methods=['GET'])
-def rebuild_model():
-    """API endpoint để xây dựng lại mô hình TF-IDF và KNN"""
-    try:
-        start_time = time.time()
-        vectorizer, knn_model, all_jobs = build_tfidf_model()
-        
-        if not vectorizer or not knn_model:
-            return jsonify({"error": "Failed to build model - no job data found"}), 400
-        
-        # Lưu model
-        with open('tfidf_knn_model.pkl', 'wb') as f:
-            pickle.dump({'vectorizer': vectorizer, 'knn_model': knn_model}, f)
-        
-        processing_time = time.time() - start_time
-        
-        return jsonify({
+@app.route('/save-stop-words', methods= ['POST'])
+def save_stop_words_into_db():
+    save_stop_words()
+    return jsonify({
             "success": True,
-            "job_count": len(all_jobs),
-            "processing_time": processing_time,
-            "message": "Model rebuilt successfully"
         })
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
 
