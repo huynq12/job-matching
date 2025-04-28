@@ -1,6 +1,6 @@
 import certifi
 from flask import Flask, request, jsonify
-from flask_cors import CORS
+from flask_cors import CORS # type: ignore
 from pymongo import MongoClient
 from pypdf import PdfReader
 import nltk
@@ -29,7 +29,7 @@ from bson.objectid import ObjectId
 #     print(f"NLTK download warning: {e}")
 load_dotenv()
 app = Flask(__name__)
-CORS(app, resources={r"/jobs/*": {"origins": "http://localhost:3000"}})
+CORS(app, resources={r"/jobs/*": {"origins": "*"}})
 
 # Cấu hình
 UPLOAD_FOLDER = 'uploads'
