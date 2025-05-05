@@ -20,6 +20,8 @@ import pandas as pd
 from dotenv import load_dotenv
 import json 
 from bson.objectid import ObjectId
+import torch
+from transformers import BertTokenizer, BertModel
 
 # Tải các resource cần thiết của NLTK
 # try:
@@ -41,6 +43,7 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # Max 16MB
 # Kết nối MongoDB
 MONGO_URI_LOCAL = "mongodb://localhost:27017/"
 MONGO_URI = os.getenv("MONGO_URI")
+MONGO_URI_ATLAS = os.getenv("MONGO_URI_ATLAS")
 DB_NAME = "job_matching"
 JOBS_COLLECTION = "job_dataset"
 JOBS_EMBEDDING = "job_embedding"
@@ -58,6 +61,7 @@ def get_mongo_connection():
 client, db = get_mongo_connection()
 stop_words_collection = db[STOPWORDS_EN]
 job_collection = db[JOBS_COLLECTION]
+job_embedding = db[JOBS_EMBEDDING]
 
 # try:
 #     nltk.download('punkt', quiet=True)
@@ -118,19 +122,18 @@ def extract_text_from_file(file_path):
 
 def preprocess_text(text):
     try:
-        return preprocess_text_v2(text)
-        # text = text.lower()
+        text = text.lower()
         
-        # text = re.sub(r'[^a-zA-Z0-9\s]', ' ', text)
+        text = re.sub(r'[^a-zA-Z0-9\s]', ' ', text)
         
-        # tokens = word_tokenize(text)
+        tokens = word_tokenize(text)
 
-        # stop_words_docs = list(stop_words_collection.find({}, {'text': 1, '_id': 0}))
-        # stop_words = set(doc['text'] for doc in stop_words_docs)
+        stop_words_docs = list(stop_words_collection.find({}, {'text': 1, '_id': 0}))
+        stop_words = set(doc['text'] for doc in stop_words_docs)
 
-        # filtered_tokens = [word for word in tokens if word not in stop_words and len(word) > 2]
+        filtered_tokens = [word for word in tokens if word not in stop_words and len(word) > 2]
         
-        # return ' '.join(filtered_tokens)
+        return ' '.join(filtered_tokens)
     except Exception as e:
         print(f"Error in text preprocessing: {e}")
         return text  
@@ -138,7 +141,7 @@ def preprocess_text(text):
 def preprocess_text_v2(text):
     try:
         text = text.lower()
-        text = re.sub(r'[^a-zA-Z\s]', '', text)
+        text = re.sub(r'[^a-zA-Z0-9\s]', '', text)
 
         sentences = sent_tokenize(text)
 
@@ -148,19 +151,18 @@ def preprocess_text_v2(text):
         processed_sentences = []
 
         for sent in sentences:
-            # if any(criteria in sent for criteria in ['skills', 'education']):
-            words = word_tokenize(sent)
-            words = [word for word in words if word not in stop_words]
-            tagged_words = pos_tag(words)
-            filtered_words = [word for word, tag in tagged_words if tag not in ['DT', 'IN', 'TO', 'PRP', 'WP']]
-            processed_sentences.append(" ".join(filtered_words))
+            if any(criteria in sent for criteria in ['skills', 'education']):
+                words = word_tokenize(sent)
+                words = [word for word in words if word not in stop_words]
+                tagged_words = pos_tag(words)
+                filtered_words = [word for word, tag in tagged_words if tag not in ['DT', 'IN', 'TO', 'PRP', 'WP']]
+                processed_sentences.append(" ".join(filtered_words))
 
         return " ".join(processed_sentences)
     except Exception as e:
         print(f"Error in text preprocessing: {e}")
         return text  
    
-
 def calculate_tfidf_docs(documents):
     idf_values = {}
     total_docs = len(documents)
@@ -208,7 +210,7 @@ def find_knn(query_vector, vectors, k):
     return distances[:k]
 
 def build_tfidf_model():
-    all_jobs = list(job_collection.find({}, {'_id': 1, 'job_description': 1, 'position_title': 1, 'model_response': 1, 'company': 1}))
+    all_jobs = list(job_embedding.find({}, {'_id': 1, 'job_description': 1, 'position_title': 1, 'model_response': 1, 'company': 1}))
     
     if not all_jobs:
         client.close()
@@ -222,8 +224,7 @@ def build_tfidf_model():
     # client.close()
     return all_jobs, tfidf_documents
 
-
-def find_matching_jobs(resume_text, k=5):
+def find_matching_jobs_with_knn(resume_text, k=5):
     processed_resume = preprocess_text(resume_text)
     resume_words = processed_resume.split()
     
@@ -314,6 +315,7 @@ def find_matching_jobs(resume_text, k=5):
     
     return matching_jobs
 
+  
 @app.route('/jobs/get-all', methods=['GET'])
 def get_all_jobs():
     filter = request.args.get('filter', '')
@@ -375,10 +377,10 @@ def get_all_jobs():
 
     return jsonify(response)
 
-@app.route('/jobs/match-resume', methods=['POST'])
-def match_resume():
+@app.route('/jobs/match-resume-knn', methods=['POST'])
+def match_resume_knn():
     """API endpoint để match CV với các jobs trong MongoDB"""
-    start_time = time.time()
+    # start_time = time.time()
     
     # Kiểm tra request có đủ file không
     if 'resume' not in request.files:
@@ -405,7 +407,7 @@ def match_resume():
             return jsonify({"error": "Could not extract text from PDF"}), 400
         
         # Tìm jobs phù hợp
-        matching_jobs = find_matching_jobs(resume_text, k)
+        matching_jobs = find_matching_jobs_with_knn(resume_text, k)
         
         # Xóa file tạm sau khi xử lý
         os.remove(resume_path)
@@ -431,6 +433,111 @@ def match_resume():
             "data": None
         }), 500
 
+
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+model = BertModel.from_pretrained('bert-base-uncased')
+def get_bert_embedding(text):
+    try:
+        # Cắt text nếu quá dài (BERT có giới hạn 512 tokens)
+        max_length = 512
+        
+        # Tokenize và encode
+        inputs = tokenizer(text, return_tensors='pt', truncation=True, max_length=max_length, padding='max_length')
+        
+        # Không tính gradient vì chỉ cần forward pass
+        with torch.no_grad():
+            outputs = model(**inputs)
+        
+        # Lấy vector embedding của token [CLS] (đại diện cho cả câu)
+        embeddings = outputs.last_hidden_state[:, 0, :].numpy().flatten()
+        
+        return embeddings.tolist()
+    except Exception as e:
+        # logger.error(f"Error generating BERT embedding: {e}")
+        return None
+
+def cosine_similarity(a, b):
+    a = np.array(a)
+    b = np.array(b)
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+
+@app.route('/jobs/match-resume-bert', methods=['POST'])
+def find_matching_jobs_bert():
+    if 'resume' not in request.files:
+        return jsonify({"error": "No CV file uploaded"}), 400
+    
+    resume_file = request.files['resume']
+    if resume_file.filename == '':
+        return jsonify({"error": "No selected CV file"}), 400
+    
+    top_n = request.args.get('k', default = 5, type=int)
+
+    resume_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(resume_file.filename))
+    
+    try:
+        resume_file.save(resume_path)
+        
+        # Trích xuất text từ PDF
+        resume_text = extract_text_from_file(resume_path)
+        if not resume_text:
+            return jsonify({"error": "Could not extract text from PDF"}), 400
+        
+        # Tính embedding cho CV
+        cv_embedding = get_bert_embedding(preprocess_text(resume_text))
+        # print(cv_embedding)
+        
+        if cv_embedding is None:
+            return jsonify({"error": "Could not generate embedding for CV"}), 500
+        
+        # Lấy tất cả job từ MongoDB
+        jobs = list(job_embedding.find({}, {'_id': 1, 'company': 1, 'position_title': 1, 'job_description': 1, 'model_response': 1, 'embedding': 1}))
+        
+        # Tính cosine similarity giữa CV và mỗi job
+        matched_jobs = []
+        for job in jobs:
+            # Kiểm tra job có embedding không
+            if 'embedding' not in job:
+                print(job)
+            benefit = None
+            model_response_str = job.get('model_response')
+            if(model_response_str):
+                try:
+                    model_response_dict = json.loads(job['model_response'])
+                    benefit = model_response_dict.get('Compensation and Benefits')
+                except (TypeError, json.JSONDecodeError):
+                    benefit = None
+
+            similarity = cosine_similarity(cv_embedding, job['embedding'])
+            matched_jobs.append({
+                'id': str(job['_id']),
+                'company': job['company'],
+                'position_title': job['position_title'],
+                'similarity_score': float(similarity),
+                'benefit': "Negotiable" if benefit == 'N/A' else benefit
+            })
+        # print(matched_jobs)
+
+        # Sắp xếp theo độ tương đồng giảm dần
+        matched_jobs.sort(key=lambda x: x['similarity_score'], reverse=True)
+
+        os.remove(resume_path)
+        
+        # Trả về top N kết quả
+        return jsonify({
+            "isSuccess": True,
+            "data": matched_jobs[:top_n],
+            "errorCode": None,
+            "message": None,
+        })
+    
+    except Exception as e:
+        return jsonify({
+            "isSuccess": False,
+            "errorCode": str(e),
+            "message": "An error occurred during processing",
+            "data": None
+        }), 500
+  
 @app.route('/save-stop-words', methods= ['POST'])
 def save_stop_words_into_db():
     save_stop_words()
@@ -440,12 +547,12 @@ def save_stop_words_into_db():
 
 @app.route('/jobs/save-job-embedding', methods = ['GET'])
 def save_job_embedding():
-    client1 = MongoClient(MONGO_URI,tlsCAFile=certifi.where())
+    client1 = MongoClient(MONGO_URI_ATLAS,tlsCAFile=certifi.where())
     db1 = client1[DB_NAME]
-    job_embedding1 = db1["job-bedding"]
+    job_embedding1 = db1[JOBS_EMBEDDING]
     data = list(job_embedding1.find({}, {'company': 1, 'position_title': 1, 'model_response': 1, 'embedding': 1}))
 
-    client2 = MongoClient(MONGO_URI_LOCAL)
+    client2 = MongoClient(MONGO_URI)
     db2 = client2[DB_NAME]
     job_embedding2 = db2[JOBS_EMBEDDING]
     if data:
@@ -454,7 +561,6 @@ def save_job_embedding():
                         "message": f"{len(data)} documents copied successfully"})
     else:
         return jsonify({"success": True, "message": "No documents to copy"})
-
     
 @app.route('/import-jobs', methods=['POST'])
 def import_jobs():
@@ -499,7 +605,6 @@ def import_jobs():
         # Xóa file tạm sau khi xử lý
         if os.path.exists(file_path):
             os.remove(file_path)
-
 
 @app.route('/health', methods=['GET'])
 def health_check():
