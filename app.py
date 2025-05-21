@@ -581,15 +581,10 @@ def find_matching_jobs_with_knn(resume_text, k=5):
     for idx, distance in neighbors:
         if idx < len(all_jobs):
             job = all_jobs[idx]
-            # print(job)
             job_id = str(job.get('_id', 'unknown'))
             position_title = job.get('position_title')
             company = job.get('company')
-            # print(job.get('company'))
-            # print(job.get('position_title'))
             similarity_score = float(1 - distance)
-            # similarity_score = distance
-            # job_description = job.get('job_description', '')
             benefit = None
             model_response_str = job.get('model_response')
             if(model_response_str):
@@ -605,7 +600,6 @@ def find_matching_jobs_with_knn(resume_text, k=5):
                 'company': company,
                 'benefit': "Negotiable" if benefit == "N/A" else benefit,
                 'similarity_score': similarity_score,
-                # 'job_description': job_description
             })
     
     return matching_jobs
