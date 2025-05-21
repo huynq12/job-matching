@@ -1,5 +1,5 @@
 import certifi
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS # type: ignore
 from pymongo import MongoClient
 from pypdf import PdfReader
@@ -22,7 +22,13 @@ import json
 from bson.objectid import ObjectId
 import torch
 from transformers import BertTokenizer, BertModel
-
+import jwt
+from passlib.context import CryptContext
+from datetime import datetime, timedelta
+from bson.objectid import ObjectId
+from functools import wraps
+from dataclasses import dataclass
+from bson.objectid import ObjectId
 # Tải các resource cần thiết của NLTK
 # try:
 #     nltk.download('punkt_tab', quiet=True)
@@ -32,7 +38,7 @@ from transformers import BertTokenizer, BertModel
 #     print(f"NLTK download warning: {e}")
 load_dotenv()
 app = Flask(__name__)
-CORS(app, resources={"/jobs/*": {"origins": "*"}})
+CORS(app, resources={"/*": {"origins": "*"}})
 
 # Cấu hình
 UPLOAD_FOLDER = 'uploads'
@@ -49,7 +55,8 @@ JOBS_COLLECTION = "job_dataset"
 JOBS_EMBEDDING = "job_embedding"
 STOPWORDS_EN = "stopwords_en"
 POS_TAG = "pos_tag"
-
+USERS_COLLECTION = "users"
+JOB_BY_USER = "job_by_user"
 
 def get_mongo_connection():
     # client = MongoClient(MONGO_URI,tlsCAFile=certifi.where())
@@ -62,7 +69,178 @@ client, db = get_mongo_connection()
 stop_words_collection = db[STOPWORDS_EN]
 job_collection = db[JOBS_COLLECTION]
 job_embedding = db[JOBS_EMBEDDING]
+users_collection = db[USERS_COLLECTION]
+job_by_user = db[JOB_BY_USER]
 
+#Authen
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
+# Cấu hình password hashing
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Models (using dataclasses)
+@dataclass
+class UserCreate:
+    username: str
+    fullname: str
+    email: str
+    phone_number: str
+    password: str
+@dataclass
+class UserResponse:
+    id: str
+    username: str
+    created_at: datetime
+    fullname: str
+    email: str
+    phone_number: str
+@dataclass
+class Token:
+    access_token: str
+    token_type: str = "bearer"
+
+@dataclass
+class TokenData:
+    username: str = None
+
+# Helper functions (same as before)
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password):
+    return pwd_context.hash(password)
+
+def get_user(username: str):
+    user = users_collection.find_one({"username": username})
+    if user:
+        user["_id"] = str(user["_id"])  # Convert ObjectId to string
+        # print(user.username)
+    return user
+
+def authenticate_user(username: str, password: str):
+    user = get_user(username)
+    if not user:
+        return False
+    if not verify_password(password, user["password"]):
+        return False
+    return user
+
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+# Flask-specific helper for getting current user
+def authorized(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({"detail": "Not authenticated"}), 401
+
+        token = auth_header.split(' ')[1]
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            username: str = payload.get("sub")
+            if username is None:
+                return jsonify({"detail": "Could not validate credentials"}), 401
+            token_data = TokenData(username=username)
+        except jwt.PyJWTError:
+            return jsonify({"detail": "Could not validate credentials"}), 401
+        user = get_user(token_data.username)
+        if user is None:
+            return jsonify({"detail": "Could not validate credentials"}), 401
+
+        return f(current_user=user, *args, **kwargs)  # Inject user into the route
+
+    return decorated_function
+
+# Routes
+@app.route("/register", methods=["POST"])
+def register():
+    user_data = request.get_json()
+    user = UserCreate(**user_data)  # Create UserCreate object
+
+    print(user)
+    # Kiểm tra username đã tồn tại chưa
+    db_user = get_user(user.username)
+    if db_user:
+        return jsonify({"detail": "Username already registered"}), 400
+
+    # Tạo user mới với password đã hash
+    hashed_password = get_password_hash(user.password)
+    new_user_data = {
+        "username": user.username,
+        "password": hashed_password,
+        "created_at": datetime.utcnow(),
+        "fullname": user.fullname,
+        "email": user.email,
+        "phone_number": user.phone_number
+    }
+
+    # Lưu vào database
+    result = users_collection.insert_one(new_user_data)
+
+    # Trả về thông tin user (không bao gồm password)
+    created_user = UserResponse(
+        id=str(result.inserted_id),
+        username=user.username,
+        created_at=new_user_data["created_at"],
+        fullname=user.fullname,
+        email=user.email,
+        phone_number=user.phone_number
+    )
+    print(created_user)
+
+    response = {
+        "isSuccess": True,
+        "message": "User has been created successfully",
+        "data": created_user.__dict__,
+        "errorCode": None
+    }
+
+    return jsonify(response), 200 # Convert to dict for JSON
+
+@app.route("/connect", methods=["POST"])
+def login_for_access_token():
+    form_data = request.get_json()
+    username = form_data.get("username")
+    password = form_data.get("password")
+
+    user = authenticate_user(username, password)
+    if not user:
+        return jsonify({"detail": "Incorrect username or password"}), 401
+
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user["username"]}, expires_delta=access_token_expires
+    )
+    return jsonify(Token(access_token=access_token).__dict__), 200
+
+@app.route("/user/profile", methods=["GET"])
+@authorized
+def read_users_me(current_user):
+    user = UserResponse(
+        id=current_user["_id"],
+        username=current_user["username"],
+        created_at=current_user["created_at"],
+        fullname=current_user.get("fullname"),
+        email=current_user.get("email"), 
+        phone_number=current_user.get("phone_number")
+    )
+    return jsonify(user.__dict__), 200
+
+# Test route
+@app.route("/", methods=["GET"])
+def root():
+    return jsonify({"message": "Authentication API is running"}), 200
 # try:
 #     nltk.download('punkt', quiet=True)
 #     nltk.download('stopwords', quiet=True)
@@ -70,8 +248,125 @@ job_embedding = db[JOBS_EMBEDDING]
 #     nltk.download('averaged_perceptron_tagger_eng', quiet=True)
 # except Exception as e:
 #     print(f"NLTK download warning: {e}")
+@app.route("/user/job-by-user", methods=["GET"])
+@authorized
+def get_matched_jos_by_user(current_user):
+    try:
+        user_id = current_user["_id"]
+        jobs = list(job_by_user.find({'user_id': user_id}, {'_id': 0,'job_id':1, 'position_title': 1, 'company': 1, 'benefit': 1, 'similarity_score': 1}))
+        return jsonify({
+                "isSuccess": False,
+                "errorCode": None,
+                "message": None,
+                "data": jobs
+            }), 200
+    except Exception as e:
+        return jsonify({
+            "isSuccess": False,
+            "errorCode": str(e),
+            "message": "An error occurred during processing",
+            "data": None
+        }), 500
+        
+
+@app.route("/user/find-job-user", methods=["POST"])
+@authorized
+def find_matched_job(current_user):
+
+    user_id = current_user["_id"]
+    user_id_obj = ObjectId(user_id)
 
 
+    if 'resume' not in request.files:
+        return jsonify({"error": "Missing resume file"}), 400
+    
+    resume_file = request.files['resume']
+    filename = secure_filename(resume_file.filename)
+    resume_path_in_db = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    
+    # Số lượng jobs muốn matching
+    k = request.form.get('k', 5)
+    try:
+        k = int(k)
+    except:
+        k = 5
+    
+    # Lưu file tạm thời
+    resume_path_on_disk = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    
+    try:
+        resume_file.save(resume_path_on_disk)
+        
+        
+        # Trích xuất text từ PDF
+        resume_text = extract_text_from_file(resume_path_on_disk)
+        if not resume_text:
+            os.remove(resume_path_on_disk)
+            return jsonify({"error": "Could not extract text from PDF"}), 400
+        
+        # Tìm jobs phù hợp
+        matching_jobs = find_matching_jobs_with_knn(resume_text, k)
+
+        current_jobs = list(job_by_user.find({'user_id': user_id}))
+
+        if(len(matching_jobs) > 0 and len(current_jobs) > 0):
+            job_by_user.delete_many({'user_id': user_id})
+
+        matching_jobs_with_user_id = []
+        
+        for job in matching_jobs:
+            job['job_id'] = job.pop('id')
+            job['user_id'] = user_id
+            matching_jobs_with_user_id.append(job)
+
+        job_by_user.insert_many(matching_jobs_with_user_id)
+
+        print(resume_path_in_db)
+        print(user_id)
+
+        result = users_collection.update_one(
+            {'_id': user_id_obj},
+            {'$set': {'resume_path': resume_path_in_db, 'resume_filename': filename}}
+        )
+        print(f"Matched count: {result.matched_count}")
+        print(f"Modified count: {result.modified_count}")
+
+        # Xóa file tạm sau khi xử lý
+        # os.remove(resume_path_on_disk)
+
+        return jsonify({
+            "isSuccess": False,
+            "errorCode": None,
+            "message": None,
+            "data": None
+        }), 200
+
+    except Exception as e:
+        # Xóa file tạm nếu có lỗi
+        if os.path.exists(resume_path_on_disk):
+            os.remove(resume_path_on_disk)
+        
+        return jsonify({
+            "isSuccess": False,
+            "errorCode": str(e),
+            "message": "An error occurred during processing",
+            "data": None
+        }), 500
+
+
+@app.route('/user/export-resume', methods=['GET'])
+@authorized
+def download_resume(current_user):
+    user_id = current_user['_id']
+    user_id_obj = ObjectId(user_id)
+
+    user = users_collection.find_one({'_id': user_id_obj})
+    if user and 'resume_path' in user:
+        resume_path = user['resume_path']
+        filename = user.get('resume_filename', 'resume.pdf') # Lấy tên file hoặc đặt mặc định
+        return send_from_directory(app.config['UPLOAD_FOLDER'], os.path.basename(resume_path), as_attachment=True, download_name=filename)
+    else:
+        return jsonify({"error": "Resume not found for this user"}), 404
 def save_stop_words():
     nltk.download('stopwords', quiet=True)
 
@@ -286,15 +581,10 @@ def find_matching_jobs_with_knn(resume_text, k=5):
     for idx, distance in neighbors:
         if idx < len(all_jobs):
             job = all_jobs[idx]
-            # print(job)
             job_id = str(job.get('_id', 'unknown'))
             position_title = job.get('position_title')
             company = job.get('company')
-            # print(job.get('company'))
-            # print(job.get('position_title'))
             similarity_score = float(1 - distance)
-            # similarity_score = distance
-            # job_description = job.get('job_description', '')
             benefit = None
             model_response_str = job.get('model_response')
             if(model_response_str):
@@ -310,13 +600,13 @@ def find_matching_jobs_with_knn(resume_text, k=5):
                 'company': company,
                 'benefit': "Negotiable" if benefit == "N/A" else benefit,
                 'similarity_score': similarity_score,
-                # 'job_description': job_description
             })
     
     return matching_jobs
 
   
 @app.route('/jobs/get-all', methods=['GET'])
+# @authorized
 def get_all_jobs():
     filter = request.args.get('filter', '')
     skip = request.args.get('skip', default = 0, type = int)
